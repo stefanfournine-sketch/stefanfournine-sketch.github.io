@@ -1,11 +1,17 @@
-// 4chan-style Anonymous Board JavaScript
+// GitHub Configuration
+const GITHUB_CONFIG = {
+    owner: 'YOUR_GITHUB_USERNAME', // Replace with your GitHub username
+    repo: 'YOUR_REPO_NAME', // Replace with your repository name
+    branch: 'main', // or 'master'
+    dataFile: 'data.json',
+    token: '' // Optional: Add GitHub personal access token for write access
+};
 
 // State
 let currentUser = null;
 let users = [];
 let posts = [];
 let comments = [];
-let dataFileHandle = null;
 
 // DOM Elements
 const loginSection = document.getElementById('login-section');
@@ -26,15 +32,38 @@ const showSignupLink = document.getElementById('show-signup');
 const showLoginLink = document.getElementById('show-login');
 
 // Initialize the application
-document.addEventListener('DOMContentLoaded', () => {
-    loadData();
-    initializeSampleData();
+document.addEventListener('DOMContentLoaded', async () => {
+    await loadData();
     checkAuthState();
     setupEventListeners();
 });
 
-// Load all data from localStorage
-function loadData() {
+// Get raw GitHub URL for data file
+function getRawUrl() {
+    return `https://raw.githubusercontent.com/${GITHUB_CONFIG.owner}/${GITHUB_CONFIG.repo}/${GITHUB_CONFIG.branch}/${GITHUB_CONFIG.dataFile}`;
+}
+
+// Load all data from GitHub or localStorage
+async function loadData() {
+    try {
+        const response = await fetch(getRawUrl() + '?' + Date.now());
+        if (response.ok) {
+            const data = await response.json();
+            users = data.users || [];
+            posts = data.posts || [];
+            comments = data.comments || [];
+            console.log('Data loaded from GitHub');
+        } else {
+            console.log('No data file found, starting fresh');
+            loadFromLocalStorage();
+        }
+    } catch (error) {
+        console.log('Error loading from GitHub, using localStorage:', error);
+        loadFromLocalStorage();
+    }
+}
+
+function loadFromLocalStorage() {
     const savedUsers = localStorage.getItem('boardUsers');
     const savedPosts = localStorage.getItem('boardPosts');
     const savedComments = localStorage.getItem('boardComments');
@@ -44,85 +73,72 @@ function loadData() {
     if (savedComments) comments = JSON.parse(savedComments);
 }
 
-// Save all data to localStorage and JSON file
-function saveData() {
+// Save all data
+async function saveData() {
+    // Save to localStorage as backup
     localStorage.setItem('boardUsers', JSON.stringify(users));
     localStorage.setItem('boardPosts', JSON.stringify(posts));
     localStorage.setItem('boardComments', JSON.stringify(comments));
     
-    // Auto-save to JSON file
-    autoSaveToFile();
+    // Try to save to GitHub if token is provided
+    if (GITHUB_CONFIG.token) {
+        await saveToGitHub();
+    }
 }
 
-// Auto-save to JSON file
-async function autoSaveToFile() {
+// Save to GitHub using API
+async function saveToGitHub() {
     const data = {
         users: users,
         posts: posts,
         comments: comments,
-        lastSaved: new Date().toISOString()
+        lastUpdated: new Date().toISOString()
     };
     
-    const dataStr = JSON.stringify(data, null, 2);
-    
-    // Try to save using File System Access API
-    if (dataFileHandle) {
-        try {
-            const writable = await dataFileHandle.createWritable();
-            await writable.write(dataStr);
-            await writable.close();
-            console.log('Data saved to file');
-            return;
-        } catch (error) {
-            console.log('Error saving to file:', error);
+    try {
+        // Get current file to get its SHA
+        const getUrl = `https://api.github.com/repos/${GITHUB_CONFIG.owner}/${GITHUB_CONFIG.repo}/contents/${GITHUB_CONFIG.dataFile}`;
+        const getResponse = await fetch(getUrl, {
+            headers: {
+                'Authorization': `token ${GITHUB_CONFIG.token}`,
+                'Accept': 'application/vnd.github.v3+json'
+            }
+        });
+        
+        let sha = null;
+        if (getResponse.ok) {
+            const fileData = await getResponse.json();
+            sha = fileData.sha;
         }
-    }
-    
-    // Fallback: Save to localStorage (already done above)
-    console.log('Data saved to localStorage');
-}
-
-// Initialize file handle on first load
-async function initFileHandle() {
-    if ('showSaveFilePicker' in window) {
-        try {
-            dataFileHandle = await window.showSaveFilePicker({
-                suggestedName: 'board-data.json',
-                types: [{
-                    description: 'JSON Files',
-                    accept: { 'application/json': ['.json'] }
-                }]
-            });
-            console.log('File handle initialized - data will auto-save');
-        } catch (error) {
-            console.log('User cancelled file picker or error:', error);
+        
+        // Update or create file
+        const content = btoa(unescape(encodeURIComponent(JSON.stringify(data, null, 2))));
+        const updateUrl = `https://api.github.com/repos/${GITHUB_CONFIG.owner}/${GITHUB_CONFIG.repo}/contents/${GITHUB_CONFIG.dataFile}`;
+        
+        const body = {
+            message: `Update data - ${new Date().toISOString()}`,
+            content: content,
+            branch: GITHUB_CONFIG.branch
+        };
+        
+        if (sha) {
+            body.sha = sha;
         }
+        
+        await fetch(updateUrl, {
+            method: 'PUT',
+            headers: {
+                'Authorization': `token ${GITHUB_CONFIG.token}`,
+                'Accept': 'application/vnd.github.v3+json',
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify(body)
+        });
+        
+        console.log('Data saved to GitHub');
+    } catch (error) {
+        console.error('Error saving to GitHub:', error);
     }
-}
-
-// Initialize file handle button in header
-function initFileHandleButton() {
-    // Remove existing button if present
-    const existingBtn = document.getElementById('init-file-btn');
-    if (existingBtn) {
-        existingBtn.remove();
-    }
-    
-    // Add button to header
-    const headerActions = document.querySelector('.header-actions');
-    if (headerActions) {
-        const initBtn = document.createElement('button');
-        initBtn.id = 'init-file-btn';
-        initBtn.className = 'btn btn-secondary';
-        initBtn.textContent = 'Save to File';
-        initBtn.addEventListener('click', initFileHandle);
-        headerActions.insertBefore(initBtn, headerActions.firstChild);
-    }
-}
-
-// Initialize sample data
-function initializeSampleData() {
-    // No sample posts - start with empty board
 }
 
 // Check if user is already logged in
@@ -138,18 +154,12 @@ function checkAuthState() {
 
 // Setup event listeners
 function setupEventListeners() {
-    // Auth forms
     loginForm.addEventListener('submit', handleLogin);
     signupForm.addEventListener('submit', handleSignup);
-    
-    // Logout button
     logoutBtn.addEventListener('click', handleLogout);
-    
-    // Post form
     postForm.addEventListener('submit', handleCreatePost);
     postFile.addEventListener('change', handleFilePreview);
     
-    // Navigation
     showSignupLink.addEventListener('click', (e) => {
         e.preventDefault();
         showSignupSection();
@@ -160,7 +170,6 @@ function setupEventListeners() {
         showLoginSection();
     });
     
-    // Export button (add to header if exists)
     const exportBtn = document.getElementById('export-btn');
     if (exportBtn) {
         exportBtn.addEventListener('click', exportData);
@@ -168,38 +177,27 @@ function setupEventListeners() {
 }
 
 // Handle login
-function handleLogin(e) {
+async function handleLogin(e) {
     e.preventDefault();
     
     const username = document.getElementById('username').value.trim();
     const password = document.getElementById('password').value;
     
-    // Clear previous error
     loginError.textContent = '';
     
-    // Validate username
-    if (!username) {
-        loginError.textContent = 'Please enter username';
+    if (!username || !password) {
+        loginError.textContent = 'Please enter username and password';
         return;
     }
     
-    // Validate password
-    if (!password) {
-        loginError.textContent = 'Please enter password';
-        return;
-    }
-    
-    // Check if there are any registered users
     if (users.length === 0) {
         loginError.textContent = 'No registered users. Please sign up first.';
         return;
     }
     
-    // Find user with EXACT username and password match
     const user = users.find(u => u.username === username && u.password === password);
     
     if (!user) {
-        // Check if username exists but password is wrong
         const userExists = users.find(u => u.username === username);
         if (userExists) {
             loginError.textContent = 'Incorrect password';
@@ -209,22 +207,20 @@ function handleLogin(e) {
         return;
     }
     
-    // Successful login
     currentUser = { username: user.username };
     localStorage.setItem('currentUser', JSON.stringify(currentUser));
     showBoardSection();
     loginForm.reset();
 }
 
-// Handle signup (no email required)
-function handleSignup(e) {
+// Handle signup
+async function handleSignup(e) {
     e.preventDefault();
     
     const username = document.getElementById('signup-username').value.trim();
     const password = document.getElementById('signup-password').value;
     const confirmPassword = document.getElementById('signup-confirm').value;
     
-    // Validation
     if (password !== confirmPassword) {
         signupError.textContent = 'Passwords do not match';
         return;
@@ -240,13 +236,11 @@ function handleSignup(e) {
         return;
     }
     
-    // Check if username already exists
     if (users.find(u => u.username === username)) {
         signupError.textContent = 'Username already taken';
         return;
     }
     
-    // Create new user
     const newUser = {
         username,
         password,
@@ -254,9 +248,8 @@ function handleSignup(e) {
     };
     
     users.push(newUser);
-    saveData();
+    await saveData();
     
-    // Auto login
     currentUser = { username };
     localStorage.setItem('currentUser', JSON.stringify(currentUser));
     
@@ -320,6 +313,7 @@ async function handleCreatePost(e) {
         content,
         author: currentUser.username,
         date: dateStr,
+        createdAt: now.getTime(),
         file: null
     };
     
@@ -328,7 +322,7 @@ async function handleCreatePost(e) {
     }
     
     posts.unshift(post);
-    saveData();
+    await saveData();
     
     postForm.reset();
     filePreview.classList.remove('active');
@@ -427,19 +421,17 @@ function createPostHTML(post) {
 
 // Setup post event listeners
 function setupPostEventListeners() {
-    // Comment buttons
     document.querySelectorAll('.comment-btn').forEach(btn => {
         btn.addEventListener('click', () => {
-            const postId = parseInt(btn.dataset.postId);
+            const postId = btn.dataset.postId;
             const commentsSection = document.getElementById(`comments-${postId}`);
             commentsSection.style.display = commentsSection.style.display === 'none' ? 'block' : 'none';
         });
     });
     
-    // Add comment buttons
     document.querySelectorAll('.add-comment-btn').forEach(btn => {
         btn.addEventListener('click', () => {
-            const postId = parseInt(btn.dataset.postId);
+            const postId = btn.dataset.postId;
             const input = document.querySelector(`.comment-input[data-post-id="${postId}"]`);
             const text = input.value.trim();
             if (text) {
@@ -449,11 +441,10 @@ function setupPostEventListeners() {
         });
     });
     
-    // Comment input enter key
     document.querySelectorAll('.comment-input').forEach(input => {
         input.addEventListener('keypress', (e) => {
             if (e.key === 'Enter') {
-                const postId = parseInt(input.dataset.postId);
+                const postId = input.dataset.postId;
                 const text = input.value.trim();
                 if (text) {
                     addComment(postId, text);
@@ -465,7 +456,7 @@ function setupPostEventListeners() {
 }
 
 // Add comment
-function addComment(postId, text) {
+async function addComment(postId, text) {
     const now = new Date();
     const dateStr = now.getFullYear() + '-' + 
         String(now.getMonth() + 1).padStart(2, '0') + '-' + 
@@ -473,14 +464,17 @@ function addComment(postId, text) {
         String(now.getHours()).padStart(2, '0') + ':' + 
         String(now.getMinutes()).padStart(2, '0');
     
-    comments.push({
+    const comment = {
+        id: Date.now(),
         postId,
         username: currentUser.username,
         text,
-        date: dateStr
-    });
+        date: dateStr,
+        createdAt: now.getTime()
+    };
     
-    saveData();
+    comments.push(comment);
+    await saveData();
     renderPosts();
 }
 
@@ -506,38 +500,9 @@ function exportData() {
     
     const link = document.createElement('a');
     link.href = url;
-    link.download = 'board-data.json';
+    link.download = 'data.json';
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);
     URL.revokeObjectURL(url);
-}
-
-// Check if file handle is supported
-function isFileSystemAccessSupported() {
-    return 'showSaveFilePicker' in window;
-}
-
-// Initialize file handle on user action
-async function initFileHandle() {
-    if (!isFileSystemAccessSupported()) {
-        console.log('File System Access API not supported');
-        return;
-    }
-    
-    try {
-        dataFileHandle = await window.showSaveFilePicker({
-            suggestedName: 'board-data.json',
-            types: [{
-                description: 'JSON Files',
-                accept: { 'application/json': ['.json'] }
-            }]
-        });
-        console.log('File handle initialized - data will auto-save');
-        
-        // Save current data immediately
-        autoSaveToFile();
-    } catch (error) {
-        console.log('User cancelled file picker');
-    }
 }
